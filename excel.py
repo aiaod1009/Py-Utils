@@ -1,7 +1,7 @@
 import json
 import pandas as pd
 
-# 你的测试数据（直接粘贴进来）
+# 测试数据
 test_categories = [
     {
         "category": "1. 基础连通性测试",
