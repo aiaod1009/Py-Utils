@@ -1,0 +1,14 @@
+# 环境变量 (包含 API Key)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 测试报告
+*_report.json
+
+# IDE
+.vscode/
+.idea/
