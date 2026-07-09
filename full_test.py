@@ -1,5 +1,5 @@
 """
-综合测试脚本 - 覆盖 FUNC / STAB / LONG / ACC 共 22 个用例
+综合测试脚本 - 覆盖 FUNC / STAB / LONG / ACC 共 23 个用例
 
 输入/输出 token 量已按比例调整（约 1:5），结果列改为详细描述。
 
@@ -411,7 +411,7 @@ def test_func_007(cfg: Config) -> TestResult:
         "messages": [{"role": "user", "content": f"以下是背景资料：\n{long_text}\n\n{question}"}],
         "max_tokens": 30000,
     }
-    m = sample_metrics(cfg, payload, n=1)
+    m = sample_metrics(cfg, payload, n=1, timeout=600)
     content = m["content"]
     passed = bool(content.strip()) and len(content) > 50 and not m["errors"]
     detail = (f"6K长文本上下文理解正常，输入{m['input_tokens']}tokens，输出{m['output_tokens']}tokens，"
@@ -504,6 +504,92 @@ def test_stab_001(cfg: Config) -> TestResult:
     detail = (f"连续{cfg.continuous_count}次请求全部成功，无错误无超时，服务稳定" if passed else
               f"连续{cfg.continuous_count}次请求中{len(errors)}次失败，错误率{len(errors)/cfg.continuous_count:.2%}")
     return make_result("STAB-001", "连续请求稳定性", passed, detail, m)
+
+
+def test_stab_002(cfg: Config) -> TestResult:
+    """缓存命中率测试"""
+    # 使用较大的 system prompt 来触发 prompt cache
+    system_prompt = gen_text(8000)
+    user_prompt = "请用一句话总结人工智能的核心概念。"
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": 200,
+    }
+    cache_hits = 0
+    cache_misses = 0
+    hit_latencies: list[float] = []
+    miss_latencies: list[float] = []
+    total = 20
+    ttft_list: list[float] = []
+    tpot_list: list[float] = []
+    tps_list: list[float] = []
+    input_tokens: list[int] = []
+    output_tokens: list[int] = []
+    errors: list[str] = []
+    print(f"  [STAB-002] 缓存命中率测试 ({total} 次请求)...")
+
+    for i in range(total):
+        try:
+            t0 = time.perf_counter()
+            resp = post(cfg, payload, stream=False)
+            lat = time.perf_counter() - t0
+            resp.raise_for_status()
+            data = resp.json()
+            usage = data.get("usage", {})
+            it = usage.get("prompt_tokens", 0)
+            vt = split_visible(usage)
+            input_tokens.append(it)
+            output_tokens.append(vt)
+            if vt > 0 and lat > 0:
+                tpot_list.append(lat / vt)
+                tps_list.append(vt / lat)
+
+            # 检测缓存命中
+            cache_read = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            cache_status = resp.headers.get("X-Cache-Status", "")
+            cache_hit_header = resp.headers.get("X-Cache-Hit", "")
+            is_hit = cache_read > 0 or cache_status.upper() == "HIT" or cache_hit_header.lower() == "true"
+
+            if is_hit:
+                cache_hits += 1
+                hit_latencies.append(lat)
+            else:
+                cache_misses += 1
+                miss_latencies.append(lat)
+
+            # 测 TTFT
+            sp = {**payload, "stream": True, "max_tokens": 100}
+            t0 = time.perf_counter()
+            resp2 = post(cfg, sp, stream=True)
+            for line in resp2.iter_lines():
+                if not line:
+                    continue
+                d = line.decode("utf-8", errors="ignore")
+                if d.startswith("data:") and "[DONE]" not in d:
+                    ttft_list.append(time.perf_counter() - t0)
+                    break
+
+            print(f"    #{i+1}: prompt_tokens={it}, cached_tokens={cache_read}, latency={lat:.2f}s, cache={'HIT' if is_hit else 'MISS'}")
+        except Exception as e:
+            errors.append(str(e)[:40])
+
+    hit_rate = cache_hits / total if total > 0 else 0
+    avg_hit_lat = statistics.mean(hit_latencies) if hit_latencies else 0
+    avg_miss_lat = statistics.mean(miss_latencies) if miss_latencies else 0
+    passed = cache_hits > 0
+    m = {
+        "ttft_list": ttft_list, "tpot_list": tpot_list, "tps_list": tps_list,
+        "input_tokens": int(statistics.mean(input_tokens)) if input_tokens else 0,
+        "output_tokens": int(statistics.mean(output_tokens)) if output_tokens else 0,
+        "errors": errors,
+    }
+    detail = (f"缓存命中率 {hit_rate:.0%} ({cache_hits}/{total})，命中平均延迟={avg_hit_lat:.2f}s，"
+              f"未命中平均延迟={avg_miss_lat:.2f}s" if passed else
+              f"缓存命中率 {hit_rate:.0%}，未检测到缓存命中（可能API不支持prompt cache）")
+    return make_result("STAB-002", "缓存命中率", passed, detail, m)
 
 
 def test_stab_004(cfg: Config) -> TestResult:
@@ -1099,6 +1185,7 @@ ALL_TESTS = {
     "FUNC-007": ("功能性", test_func_007),
     "FUNC-008": ("功能性", test_func_008),
     "STAB-001": ("稳定性", test_stab_001),
+    "STAB-002": ("稳定性", test_stab_002),
     "STAB-004": ("稳定性", test_stab_004),
     "STAB-005": ("稳定性", test_stab_005),
     "LONG-001": ("长任务", test_long_001),
