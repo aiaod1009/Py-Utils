@@ -225,8 +225,8 @@ def make_result(case_id: str, name: str, passed: bool, detail: str, metrics: dic
         input_tokens=metrics.get("input_tokens", 0),
         output_tokens=metrics.get("output_tokens", 0),
         tps=round(statistics.mean(metrics.get("tps_list", [0])) if metrics.get("tps_list") else 0, 2),
-        ttft_p95=round(pct(metrics.get("ttft_list", []), 95), 4),
-        tpot_p95=round(pct(metrics.get("tpot_list", []), 95), 4),
+        ttft_p95=round(pct(metrics.get("ttft_list", []), 95) * 1000, 2),
+        tpot_p95=round(pct(metrics.get("tpot_list", []), 95) * 1000, 2),
     )
 
 
@@ -339,7 +339,7 @@ def test_func_003(cfg: Config) -> TestResult:
     m = sample_metrics(cfg, nf, n=cfg.sample_count)
     m["ttft_list"] = ttft_list
     passed = sse_ok and not errors
-    detail = (f"SSE流式输出正常，TTFT p95={pct(ttft_list, 95):.3f}s" if passed else
+    detail = (f"SSE流式输出正常，TTFT p95={pct(ttft_list, 95)*1000:.1f}ms" if passed else
               f"流式输出失败：{'；'.join(errors[:2]) or '未收到SSE事件'}")
     return make_result("FUNC-003", "流式输出", passed, detail, m)
 
@@ -700,7 +700,7 @@ def test_stab_005(cfg: Config) -> TestResult:
         "errors": [],
     }
     detail = (f"突发{cfg.rate_limit_burst}并发成功触发限流，{count_429}/{len(results)}个请求返回429，"
-              f"其余{len(ttft_list)}个成功请求TTFT p95={pct(ttft_list, 95):.3f}s" if passed else
+              f"其余{len(ttft_list)}个成功请求TTFT p95={pct(ttft_list, 95)*1000:.1f}ms" if passed else
               f"突发{cfg.rate_limit_burst}并发未触发限流(429)，{len(ttft_list)}个请求全部通过")
     return make_result("STAB-005", "服务限流", passed, detail, m)
 
@@ -1203,10 +1203,61 @@ ALL_TESTS = {
 }
 
 
+def export_excel(results: list[TestResult], filepath: str = "full_report.xlsx"):
+    """导出 Excel 表格，列与测试结果.md 对齐"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    except ImportError:
+        print("  未安装 openpyxl，跳过 Excel 导出。pip install openpyxl")
+        return
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "测试结果"
+
+    # 表头
+    headers = ["测试结果", "输入（token量）", "输出（token量）", "TPS", "TTFT（p95）", "TPOT（p95）"]
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = thin_border
+
+    # 数据行
+    for row_idx, r in enumerate(results, 2):
+        values = [r.detail, r.input_tokens, r.output_tokens, r.tps, r.ttft_p95, r.tpot_p95]
+        for col_idx, val in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+            if col_idx == 1:
+                cell.alignment = Alignment(wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="center")
+
+    # 列宽
+    ws.column_dimensions["A"].width = 75
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 10
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 14
+
+    wb.save(filepath)
+    print(f"\nExcel 报告已保存至 {filepath}")
+
+
 def print_table(results: list[TestResult]):
     """打印结果表格，结果列改为详细描述"""
     print("\n" + "=" * 140)
-    print(f"{'用例ID':<12} {'类别':<8} {'测试项':<20} {'测试结果描述':<55} {'输入Token':<10} {'输出Token':<10} {'TPS':<8} {'TTFT p95':<10} {'TPOT p95':<10}")
+    print(f"{'用例ID':<12} {'类别':<8} {'测试项':<20} {'测试结果描述':<55} {'输入Token':<10} {'输出Token':<10} {'TPS':<8} {'TTFT p95(ms)':<12} {'TPOT p95(ms)':<12}")
     print("-" * 140)
     passed = failed = skipped = 0
     for r in results:
@@ -1267,6 +1318,7 @@ def main():
         print(f"  => {st}: {r.detail}")
         print()
     print_table(results)
+    export_excel(results)
     report = []
     for r in results:
         st = "通过" if r.passed else ("跳过" if "跳过" in r.detail else "未通过")
