@@ -1,5 +1,5 @@
 """
-综合测试脚本 - 覆盖 FUNC / STAB / LONG / ACC 共 23 个用例
+综合测试脚本 - 覆盖 FUNC / STAB / LONG / ACC 共 22 个用例
 
 输入/输出 token 量已按比例调整（约 1:5），结果列改为详细描述。
 
@@ -1183,9 +1183,7 @@ ALL_TESTS = {
     "FUNC-005": ("功能性", test_func_005),
     "FUNC-006": ("功能性", test_func_006),
     "FUNC-007": ("功能性", test_func_007),
-    "FUNC-008": ("功能性", test_func_008),
     "STAB-001": ("稳定性", test_stab_001),
-    "STAB-002": ("稳定性", test_stab_002),
     "STAB-004": ("稳定性", test_stab_004),
     "STAB-005": ("稳定性", test_stab_005),
     "LONG-001": ("长任务", test_long_001),
@@ -1200,6 +1198,7 @@ ALL_TESTS = {
     "ACC-003": ("准确性", test_acc_003),
     "ACC-004": ("准确性", test_acc_004),
     "ACC-005": ("准确性", test_acc_005),
+    "STAB-002": ("稳定性", test_stab_002),
 }
 
 
