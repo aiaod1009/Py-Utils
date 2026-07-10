@@ -380,26 +380,129 @@ def test_func_005(cfg: Config) -> TestResult:
 
 
 def test_func_006(cfg: Config) -> TestResult:
-    """工具调用（Tool Call）"""
+    """工具调用（完整闭环：触发→执行→回传→最终回复）"""
+    import json as _json
+
     tools = [{
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "获取指定城市的天气",
-            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+            "description": "获取指定城市的天气信息，返回天气、温度、湿度等",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string", "description": "城市名称"}},
+                "required": ["city"],
+            },
         },
     }]
-    payload = {"messages": msgs("北京今天天气怎么样？"), "max_tokens": 200, "tools": tools}
-    m = sample_metrics(cfg, payload)
-    has_tool = False
+
+    # 模拟天气数据，根据城市名返回不同结果
+    def _mock_get_weather(city: str) -> dict:
+        city = city.strip()
+        weather_data = {
+            "北京": {"weather": "晴天", "temperature": "25°C", "humidity": "40%", "wind": "北风3级"},
+            "上海": {"weather": "多云", "temperature": "28°C", "humidity": "65%", "wind": "东南风2级"},
+            "深圳": {"weather": "阵雨", "temperature": "30°C", "humidity": "80%", "wind": "南风4级"},
+        }
+        return weather_data.get(city, {"weather": "晴", "temperature": "22°C", "humidity": "50%", "wind": "微风"})
+
+    ttft_list: list[float] = []
+    tpot_list: list[float] = []
+    tps_list: list[float] = []
+    input_tokens: list[int] = []
+    output_tokens: list[int] = []
+    errors: list[str] = []
+
+    messages: list[dict] = [{"role": "user", "content": "北京今天天气怎么样？"}]
+    payload = {"messages": messages, "max_tokens": 200, "tools": tools}
+
     try:
-        msg = post(cfg, payload, stream=False).json()["choices"][0]["message"]
-        has_tool = bool(msg.get("tool_calls"))
-    except Exception:
-        pass
-    passed = has_tool and not m["errors"]
-    detail = (f"Tool Call功能正常，模型正确触发了get_weather函数调用" if passed else
-              f"Tool Call失败：模型未触发工具调用")
+        # 第1步：发送请求，模型应返回 tool_calls
+        t0 = time.perf_counter()
+        resp = post(cfg, payload, stream=False)
+        lat1 = time.perf_counter() - t0
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        usage1 = data.get("usage", {})
+        input_tokens.append(usage1.get("prompt_tokens", 0))
+        output_tokens.append(split_visible(usage1))
+        if split_visible(usage1) > 0 and lat1 > 0:
+            tpot_list.append(lat1 / split_visible(usage1))
+            tps_list.append(split_visible(usage1) / lat1)
+
+        tool_calls = msg.get("tool_calls")
+        if not tool_calls:
+            errors.append("模型未返回tool_calls")
+            raise AssertionError("no tool_calls")
+
+        # 第2步：解析 tool_call，执行工具函数
+        tc = tool_calls[0]
+        func_name = tc["function"]["name"]
+        func_args = _json.loads(tc["function"]["arguments"])
+        if func_name != "get_weather":
+            errors.append(f"调用了错误的函数：{func_name}")
+            raise AssertionError(f"wrong function: {func_name}")
+
+        tool_result = _mock_get_weather(func_args.get("city", "北京"))
+
+        # 第3步：将工具结果回传给模型
+        messages.append(msg)  # assistant 消息（含 tool_calls）
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": _json.dumps(tool_result, ensure_ascii=False),
+        })
+
+        # 第4步：再次请求模型，基于工具结果生成最终回复
+        payload2 = {"messages": messages, "max_tokens": 200}
+        t0 = time.perf_counter()
+        resp2 = post(cfg, payload2, stream=False)
+        lat2 = time.perf_counter() - t0
+        resp2.raise_for_status()
+        data2 = resp2.json()
+        final_reply = data2["choices"][0]["message"]["content"]
+        usage2 = data2.get("usage", {})
+        input_tokens.append(usage2.get("prompt_tokens", 0))
+        vt2 = split_visible(usage2)
+        output_tokens.append(vt2)
+        if vt2 > 0 and lat2 > 0:
+            tpot_list.append(lat2 / vt2)
+            tps_list.append(vt2 / lat2)
+
+        # 测 TTFT（流式）
+        for sp_payload in [payload, payload2]:
+            try:
+                sp = {**sp_payload, "stream": True, "max_tokens": 100}
+                t0 = time.perf_counter()
+                sresp = post(cfg, sp, stream=True)
+                for line in sresp.iter_lines():
+                    if not line:
+                        continue
+                    d = line.decode("utf-8", errors="ignore")
+                    if d.startswith("data:") and "[DONE]" not in d:
+                        ttft_list.append(time.perf_counter() - t0)
+                        break
+            except Exception:
+                pass
+
+        # 第5步：验证最终回复是否引用了工具结果
+        weather_ok = tool_result["weather"] in final_reply or "25" in final_reply or "晴" in final_reply
+        passed = weather_ok and not errors
+        detail = (f"完整工具调用闭环成功：触发get_weather({func_args.get('city','?')})→"
+                  f"执行结果{_json.dumps(tool_result, ensure_ascii=False)}→"
+                  f"最终回复引用天气信息={weather_ok}" if passed else
+                  f"工具调用闭环失败：{'；'.join(errors[:2]) or '最终回复未引用工具结果'}")
+    except Exception as e:
+        passed = False
+        detail = f"工具调用闭环异常：{e}"
+
+    m = {
+        "ttft_list": ttft_list, "tpot_list": tpot_list, "tps_list": tps_list,
+        "input_tokens": int(statistics.mean(input_tokens)) if input_tokens else 0,
+        "output_tokens": int(statistics.mean(output_tokens)) if output_tokens else 0,
+        "errors": errors,
+    }
     return make_result("FUNC-006", "工具调用", passed, detail, m)
 
 
@@ -901,31 +1004,158 @@ def test_long_005(cfg: Config) -> TestResult:
 
 
 def test_long_006(cfg: Config) -> TestResult:
-    """Agent 多步骤任务"""
+    """Agent 多步骤任务（完整闭环：search→执行→回传→calculate→执行→回传→最终回复）"""
+    import json as _json
+
     tools = [
         {"type": "function", "function": {
-            "name": "search", "description": "搜索信息",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            "name": "search",
+            "description": "搜索指定关键词的信息，返回相关数据",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "搜索关键词"}},
+                "required": ["query"],
+            },
         }},
         {"type": "function", "function": {
-            "name": "calculate", "description": "执行计算",
-            "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]},
+            "name": "calculate",
+            "description": "执行数学计算，支持加减乘除等运算",
+            "parameters": {
+                "type": "object",
+                "properties": {"expression": {"type": "string", "description": "数学表达式，如 '25.5+18.3+4.2'"}},
+                "required": ["expression"],
+            },
         }},
     ]
-    payload = {
-        "messages": msgs("请搜索'2024年全球GDP排名'，然后计算排名前三的国家GDP总和。"),
-        "max_tokens": 500, "tools": tools,
+
+    # 模拟工具执行
+    def _execute_tool(name: str, args: dict) -> str:
+        if name == "search":
+            query = args.get("query", "")
+            if "GDP" in query or "gdp" in query.lower():
+                return _json.dumps({
+                    "2024年全球GDP排名（万亿美元）": [
+                        {"排名": 1, "国家": "美国", "GDP": 28.78},
+                        {"排名": 2, "国家": "中国", "GDP": 18.53},
+                        {"排名": 3, "国家": "德国", "GDP": 4.59},
+                        {"排名": 4, "国家": "日本", "GDP": 4.11},
+                        {"排名": 5, "国家": "印度", "GDP": 3.94},
+                    ]
+                }, ensure_ascii=False)
+            return _json.dumps({"result": f"搜索结果：{query}"}, ensure_ascii=False)
+        elif name == "calculate":
+            expr = args.get("expression", "")
+            try:
+                # 安全计算：只允许数字和基本运算符
+                sanitized = "".join(c for c in expr if c in "0123456789.+-*/() ")
+                if not sanitized:
+                    raise ValueError("empty expression")
+                result = eval(sanitized)
+                return _json.dumps({"expression": expr, "result": result}, ensure_ascii=False)
+            except Exception:
+                return _json.dumps({"expression": expr, "result": "计算错误"}, ensure_ascii=False)
+        return _json.dumps({"error": f"未知工具：{name}"})
+
+    ttft_list: list[float] = []
+    tpot_list: list[float] = []
+    tps_list: list[float] = []
+    input_tokens: list[int] = []
+    output_tokens: list[int] = []
+    errors: list[str] = []
+    tool_call_log: list[str] = []
+
+    messages: list[dict] = [
+        {"role": "user", "content": "请搜索'2024年全球GDP排名'，然后计算排名前三的国家GDP总和。"
+                                    "请给出具体的数字和计算过程。"}
+    ]
+    max_turns = 5  # 防止无限循环
+    final_reply = ""
+    search_called = False
+    calculate_called = False
+
+    print("  [LONG-006] Agent 多步骤工具调用闭环中...")
+    for turn in range(max_turns):
+        payload = {"messages": messages, "max_tokens": 500, "tools": tools}
+        try:
+            t0 = time.perf_counter()
+            resp = post(cfg, payload, stream=False, timeout=300)
+            lat = time.perf_counter() - t0
+            resp.raise_for_status()
+            data = resp.json()
+            msg = data["choices"][0]["message"]
+            usage = data.get("usage", {})
+            it = usage.get("prompt_tokens", 0)
+            vt = split_visible(usage)
+            input_tokens.append(it)
+            output_tokens.append(vt)
+            if vt > 0 and lat > 0:
+                tpot_list.append(lat / vt)
+                tps_list.append(vt / lat)
+
+            # 测 TTFT
+            try:
+                sp = {**payload, "stream": True, "max_tokens": 100}
+                t0 = time.perf_counter()
+                sresp = post(cfg, sp, stream=True)
+                for line in sresp.iter_lines():
+                    if not line:
+                        continue
+                    d = line.decode("utf-8", errors="ignore")
+                    if d.startswith("data:") and "[DONE]" not in d:
+                        ttft_list.append(time.perf_counter() - t0)
+                        break
+            except Exception:
+                pass
+
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                # 没有工具调用，说明模型已经给出最终回复
+                final_reply = msg.get("content", "")
+                print(f"    第{turn+1}轮：模型给出最终回复（{len(final_reply)}字）")
+                break
+
+            # 有工具调用，逐个执行
+            print(f"    第{turn+1}轮：模型调用了 {len(tool_calls)} 个工具 → ", end="")
+            messages.append(msg)
+            for tc in tool_calls:
+                func_name = tc["function"]["name"]
+                func_args = _json.loads(tc["function"]["arguments"])
+                tool_result = _execute_tool(func_name, func_args)
+                tool_call_log.append(f"{func_name}({_json.dumps(func_args, ensure_ascii=False)})")
+                if func_name == "search":
+                    search_called = True
+                elif func_name == "calculate":
+                    calculate_called = True
+                print(f"{func_name} ", end="")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": tool_result,
+                })
+            print()
+
+        except Exception as e:
+            errors.append(f"第{turn+1}轮：{e}")
+            break
+
+    # 验证：至少调用了search和calculate，且最终回复有内容
+    has_search = search_called
+    has_calc = calculate_called
+    has_final = bool(final_reply.strip()) and len(final_reply) > 20
+    # 检查最终回复是否包含GDP相关数字
+    has_gdp_info = any(kw in final_reply for kw in ["28", "18", "4.5", "51", "万亿", "GDP", "总和"])
+
+    passed = has_search and has_calc and has_final and has_gdp_info and not errors
+    m = {
+        "ttft_list": ttft_list, "tpot_list": tpot_list, "tps_list": tps_list,
+        "input_tokens": int(statistics.mean(input_tokens)) if input_tokens else 0,
+        "output_tokens": int(statistics.mean(output_tokens)) if output_tokens else 0,
+        "errors": errors,
     }
-    m = sample_metrics(cfg, payload, n=1)
-    has_tool = False
-    try:
-        msg = post(cfg, payload, stream=False, timeout=120).json()["choices"][0]["message"]
-        has_tool = bool(msg.get("tool_calls"))
-    except Exception as e:
-        m["errors"].append(str(e))
-    passed = has_tool and not m["errors"]
-    detail = (f"Agent多步骤任务正常，模型正确触发了工具调用" if passed else
-              f"Agent多步骤任务失败：模型未触发工具调用")
+    detail = (f"Agent多步骤闭环成功：{tool_call_log}→最终回复({len(final_reply)}字)，"
+              f"search={has_search} calculate={has_calc} GDP信息={has_gdp_info}" if passed else
+              f"Agent多步骤闭环失败：search={has_search} calculate={has_calc} "
+              f"final={has_final} GDP={has_gdp_info} 错误={'；'.join(errors[:2])}")
     return make_result("LONG-006", "Agent多步骤任务", passed, detail, m)
 
 
