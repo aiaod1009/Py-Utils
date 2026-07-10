@@ -470,22 +470,6 @@ def test_func_006(cfg: Config) -> TestResult:
             tpot_list.append(lat2 / vt2)
             tps_list.append(vt2 / lat2)
 
-        # 测 TTFT（流式）
-        for sp_payload in [payload, payload2]:
-            try:
-                sp = {**sp_payload, "stream": True, "max_tokens": 100}
-                t0 = time.perf_counter()
-                sresp = post(cfg, sp, stream=True)
-                for line in sresp.iter_lines():
-                    if not line:
-                        continue
-                    d = line.decode("utf-8", errors="ignore")
-                    if d.startswith("data:") and "[DONE]" not in d:
-                        ttft_list.append(time.perf_counter() - t0)
-                        break
-            except Exception:
-                pass
-
         # 第5步：验证最终回复是否引用了工具结果
         weather_ok = tool_result["weather"] in final_reply or "25" in final_reply or "晴" in final_reply
         passed = weather_ok and not errors
@@ -1091,21 +1075,6 @@ def test_long_006(cfg: Config) -> TestResult:
             if vt > 0 and lat > 0:
                 tpot_list.append(lat / vt)
                 tps_list.append(vt / lat)
-
-            # 测 TTFT
-            try:
-                sp = {**payload, "stream": True, "max_tokens": 100}
-                t0 = time.perf_counter()
-                sresp = post(cfg, sp, stream=True)
-                for line in sresp.iter_lines():
-                    if not line:
-                        continue
-                    d = line.decode("utf-8", errors="ignore")
-                    if d.startswith("data:") and "[DONE]" not in d:
-                        ttft_list.append(time.perf_counter() - t0)
-                        break
-            except Exception:
-                pass
 
             tool_calls = msg.get("tool_calls")
             if not tool_calls:
