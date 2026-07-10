@@ -1516,7 +1516,13 @@ def main():
         print(f"  => {st}: {r.detail}")
         print()
     print_table(results)
-    export_excel(results)
+    if only:
+        # 非全量测试，用不同文件名避免覆盖全量报告
+        ids_str = "-".join(sorted(only))[:80]
+        excel_path = f"full_report_{cfg.model}_{ids_str}.xlsx"
+        export_excel(results, excel_path)
+    else:
+        export_excel(results)
     report = []
     for r in results:
         st = "通过" if r.passed else ("跳过" if "跳过" in r.detail else "未通过")
