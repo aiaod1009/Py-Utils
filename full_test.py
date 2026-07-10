@@ -967,7 +967,9 @@ def test_long_004(cfg: Config) -> TestResult:
     }
     detail = (f"200K上下文30轮对话完成，密码记忆={h1} 暗号记忆={h2}，"
               f"累计最高约{input_tokens[-1] if input_tokens else 0}tokens" if passed else
-              f"200K上下文对话失败，密码记忆={h1} 暗号记忆={h2}")
+              f"200K上下文对话失败，密码记忆={h1} 暗号记忆={h2}，"
+              f"中间{len(errors)}轮出错：{'；'.join(errors[:2])}" if errors else
+              f"200K上下文对话失败，密码记忆={h1} 暗号记忆={h2}（原因未知）")
     return make_result("LONG-004", "长对话上下文", passed, detail, m)
 
 
