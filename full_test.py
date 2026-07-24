@@ -55,6 +55,7 @@ class Config:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "OpenAI-Compatible-Test/1.0",
         }
 
     def chat_url(self) -> str:
