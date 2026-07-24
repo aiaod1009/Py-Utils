@@ -95,51 +95,13 @@ def pct(values: list[float], p: float) -> float:
 def post(cfg: Config, payload: dict, stream: bool = False, timeout: int | None = None) -> requests.Response:
     payload = {"model": cfg.model, **payload}
     payload["enable_thinking"] = cfg.enable_thinking
-    debug_url = os.getenv("DEBUG_SERVER_URL", "http://127.0.0.1:7777/event")
-    debug_data = {
-        "sessionId": "remote-disconnect-error",
-        "runId": "post-fix",
-        "hypothesisId": "A-B-C-D-E",
-        "location": "full_test.py:post",
-        "msg": "[DEBUG] Model request transport",
-        "data": {
-            "url": cfg.chat_url(),
-            "model": cfg.model,
-            "stream": stream,
-            "timeout": timeout or cfg.timeout,
-            "message_count": len(payload.get("messages", [])),
-            "proxy_env": {key: bool(os.getenv(key)) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")},
-        },
-    }
-    # #region debug-point A-B-C-D-E:request
-    try:
-        requests.post(debug_url, json={**debug_data, "msg": "[DEBUG] Before model request"}, timeout=1)
-    except Exception:
-        pass
-    # #endregion
-    try:
-        response = requests.post(
-            cfg.chat_url(),
-            headers=cfg.headers,
-            json=payload,
-            stream=stream,
-            timeout=timeout or cfg.timeout,
-        )
-        # #region debug-point A-C-D-E:response
-        try:
-            requests.post(debug_url, json={**debug_data, "msg": "[DEBUG] Model response received", "data": {**debug_data["data"], "status": response.status_code, "response_headers": dict(response.headers)}}, timeout=1)
-        except Exception:
-            pass
-        # #endregion
-        return response
-    except Exception as exc:
-        # #region debug-point B-D-E:exception
-        try:
-            requests.post(debug_url, json={**debug_data, "msg": "[DEBUG] Model request failed", "data": {**debug_data["data"], "exception_type": type(exc).__name__, "exception": repr(exc), "cause": repr(exc.__cause__), "context": repr(exc.__context__)}}, timeout=1)
-        except Exception:
-            pass
-        # #endregion
-        raise
+    return requests.post(
+        cfg.chat_url(),
+        headers=cfg.headers,
+        json=payload,
+        stream=stream,
+        timeout=timeout or cfg.timeout,
+    )
 
 
 def msgs(prompt: str, system: str | None = None) -> list[dict]:

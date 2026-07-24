@@ -153,6 +153,14 @@ python full_test.py --samples 10 --only FUNC-001,PERF-001
 - 每个用例的通过状态、详细描述、性能指标
 - 按类别分组的汇总
 
+## Bug 修复日志
+
+### 2026-07-24
+
+- 修复部分 API 网关主动断开 `python-requests` 默认连接，导致 `RemoteDisconnected` 的问题：请求头增加通用 `User-Agent`。
+- 明确模型 ID 区分大小写，应使用 `/v1/models` 返回的原始 ID，例如 `gpt-5.5`，不能写成 `GPT-5.5`。
+- 同一错误出现两次是因为性能采样会分别发送一次非流式请求和一次流式请求。
+
 ## 注意事项
 - `.env` 文件包含 API Key，请勿提交到公开仓库
 - 长上下文和超长输出测试耗时较长，建议先用 `--only` 选测
