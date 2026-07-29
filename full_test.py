@@ -28,6 +28,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+API_SESSION = requests.Session()
+API_SESSION.trust_env = False
+
 # ============================================================
 # 配置
 # ============================================================
@@ -95,7 +98,7 @@ def pct(values: list[float], p: float) -> float:
 def post(cfg: Config, payload: dict, stream: bool = False, timeout: int | None = None) -> requests.Response:
     payload = {"model": cfg.model, **payload}
     payload["enable_thinking"] = cfg.enable_thinking
-    return requests.post(
+    return API_SESSION.post(
         cfg.chat_url(),
         headers=cfg.headers,
         json=payload,
