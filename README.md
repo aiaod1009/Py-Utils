@@ -169,4 +169,3 @@ python full_test.py --samples 10 --only FUNC-001,PERF-001
 - MiniMax-2.5等模型仅支持深度思考模式，务必改成true
 - 其他模型支持深度思考模式，建议改成false
 1
-2
