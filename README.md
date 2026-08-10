@@ -172,4 +172,3 @@ python full_test.py --samples 10 --only FUNC-001,PERF-001
 2
 3
 4
-5
