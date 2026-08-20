@@ -167,23 +167,79 @@ def eval_completion(content: str) -> tuple[bool, float, str]:
 
 
 # ============================================================
-# 执行单次流式请求, 精确测量TTFT/TPOT
+# 执行测试: 双请求模式
+#   1) 非流式请求: 测总延迟 / 准确usage / 内容(用于任务完成度评估)
+#   2) 流式请求(小max_tokens): 仅测TTFT
+# 这样即使中转缓冲式流式, TPOT/TPS 仍可由非流式总延迟准确得出
 # ============================================================
-def run_sample(ep: dict, condition: dict) -> SampleResult:
+def _build_prompt(condition: dict) -> str:
+    context = gen_text(condition["input_tokens"])
+    return context + TASK_INSTRUCTION
+
+
+def _non_stream_request(ep: dict, condition: dict, prompt: str) -> SampleResult:
+    """非流式请求: 获取总延迟、usage、内容"""
     res = SampleResult()
     session = requests.Session()
     session.trust_env = False
-
-    context = gen_text(condition["input_tokens"])
-    prompt = context + TASK_INSTRUCTION
     payload = {
         "model": ep["model"],
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": condition["max_tokens"],
-        "stream": True,
-        "stream_options": {"include_usage": True},
+        "stream": False,
+        "enable_thinking": False,
     }
+    t0 = time.perf_counter()
+    try:
+        resp = session.post(
+            chat_url(ep["base_url"]),
+            headers=headers_of(ep),
+            json=payload,
+            timeout=900,
+        )
+        lat = time.perf_counter() - t0
+        if resp.status_code != 200:
+            res.error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            return res
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        usage = data.get("usage", {})
+        res.total_latency = lat
+        res.input_tokens = usage.get("prompt_tokens", 0)
+        res.output_tokens = usage.get("completion_tokens", 0)
+        res.content_len = len(content)
+        if res.output_tokens == 0 and content:
+            # usage未返回, 用字符数估算 (中文~1.4字符/token)
+            res.output_tokens = max(1, int(len(content) / 1.4))
+            res.notes = "usage无completion_tokens,按字符估算"
+        # TPOT = 总延迟 / 输出tokens (含TTFT, 与 full_test.py 口径一致)
+        if res.output_tokens > 0 and lat > 0:
+            res.tpot = lat / res.output_tokens
+            res.tps = res.output_tokens / lat
+        # 任务完成度评估
+        completed, score, notes = eval_completion(content)
+        res.task_completed = completed
+        res.completion_score = score
+        if res.notes:
+            res.notes += "；" + notes
+        else:
+            res.notes = notes
+    except Exception as e:
+        res.error = f"{type(e).__name__}: {str(e)[:150]}"
+    return res
 
+
+def _stream_ttft(ep: dict, condition: dict, prompt: str) -> tuple[float, str]:
+    """流式请求(小max_tokens)测量TTFT, 返回 (ttft秒, 错误信息)"""
+    session = requests.Session()
+    session.trust_env = False
+    payload = {
+        "model": ep["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": min(100, condition["max_tokens"]),
+        "stream": True,
+        "enable_thinking": False,
+    }
     t0 = time.perf_counter()
     try:
         resp = session.post(
@@ -191,16 +247,11 @@ def run_sample(ep: dict, condition: dict) -> SampleResult:
             headers=headers_of(ep),
             json=payload,
             stream=True,
-            timeout=600,
+            timeout=900,
         )
-        resp.raise_for_status()
-
-        t_first = None
-        content_parts: list[str] = []
-        chunk_count = 0
-        usage_tokens_out = 0
-        usage_tokens_in = 0
-
+        if resp.status_code != 200:
+            return 0.0, f"HTTP {resp.status_code}: {resp.text[:150]}"
+        first_line_sample = ""
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -214,57 +265,36 @@ def run_sample(ep: dict, condition: dict) -> SampleResult:
                 chunk = json.loads(payload_str)
             except json.JSONDecodeError:
                 continue
-
-            u = chunk.get("usage")
-            if u:
-                usage_tokens_in = u.get("prompt_tokens", usage_tokens_in)
-                usage_tokens_out = u.get("completion_tokens", usage_tokens_out)
-
             choices = chunk.get("choices", [])
             if not choices:
                 continue
             delta = choices[0].get("delta", {})
             token = delta.get("content")
             if token:
-                if t_first is None:
-                    t_first = time.perf_counter()
-                content_parts.append(token)
-                chunk_count += 1
-
-        t_end = time.perf_counter()
-        res.total_latency = t_end - t0
-
-        if t_first is not None:
-            res.ttft = t_first - t0
-            # 优先使用 usage 报告的输出tokens; 否则用chunk数近似
-            out_tokens = usage_tokens_out if usage_tokens_out > 0 else chunk_count
-            res.output_tokens = out_tokens
-            res.input_tokens = usage_tokens_in
-            # TPOT = (总耗时 - TTFT) / (output_tokens - 1), 排除首token
-            if out_tokens > 1:
-                res.tpot = (t_end - t_first) / (out_tokens - 1)
-            # TPS = output_tokens / (总耗时 - TTFT)
-            gen_time = t_end - t_first
-            if gen_time > 0:
-                res.tps = out_tokens / gen_time
-            res.content_len = sum(len(p) for p in content_parts)
-            completed, score, notes = eval_completion("".join(content_parts))
-            res.task_completed = completed
-            res.completion_score = score
-            res.notes = notes
-            if usage_tokens_out == 0:
-                res.notes += "；usage未返回output_tokens,用chunk数近似"
-        else:
-            res.error = "未收到任何内容token"
-    except requests.exceptions.HTTPError as e:
-        body = ""
-        try:
-            body = e.response.text[:200]
-        except Exception:
-            pass
-        res.error = f"HTTPError {e.response.status_code if e.response is not None else '?'}: {body}"
+                return (time.perf_counter() - t0, "")
+            first_line_sample = payload_str[:80]
+        return (0.0, f"未收到内容token,首块样例: {first_line_sample}")
     except Exception as e:
-        res.error = f"{type(e).__name__}: {str(e)[:150]}"
+        return (0.0, f"{type(e).__name__}: {str(e)[:120]}")
+
+
+def run_sample(ep: dict, condition: dict) -> SampleResult:
+    prompt = _build_prompt(condition)
+    # 1) 非流式: 总延迟 + usage + 内容
+    res = _non_stream_request(ep, condition, prompt)
+    if res.error:
+        return res
+    # 2) 流式: 仅测TTFT
+    ttft, err = _stream_ttft(ep, condition, prompt)
+    if err:
+        res.notes = (res.notes + "；" if res.notes else "") + f"TTFT测量失败: {err}"
+        # TTFT 取总延迟的近似 (无法精确测量首token)
+        res.ttft = res.total_latency
+    else:
+        res.ttft = ttft
+        # 检测缓冲式流式: 若TTFT接近总延迟的80%以上, 说明中转可能缓冲
+        if res.total_latency > 0 and ttft > res.total_latency * 0.8 and res.output_tokens > 50:
+            res.notes = (res.notes + "；" if res.notes else "") + "疑似缓冲式流式(TTFT≈总延迟)"
     return res
 
 
@@ -297,6 +327,8 @@ def main():
             samples: list[SampleResult] = []
             print(f"\n  [{cn}] 输入~{cond['input_tokens']}tokens, 输出上限{cond['max_tokens']}, 样本={cond['samples']}")
             for i in range(cond["samples"]):
+                if i > 0:
+                    time.sleep(3)  # 样本间小延迟, 避免限流
                 print(f"    样本 {i+1}/{cond['samples']} ...", end=" ", flush=True)
                 t_start = time.perf_counter()
                 sr = run_sample(ep, cond)
@@ -390,7 +422,7 @@ def generate_report(results: dict[str, dict[str, list[SampleResult]]]):
         lines.append("| " + " | ".join(row) + " |")
     lines.append("")
 
-    lines.append("### 4.2 TPOT 每输出token耗时对比 (ms, 越低越好, 不含TTFT)\n")
+    lines.append("### 4.2 TPOT 每输出token耗时对比 (ms, 越低越好, 含TTFT的总延迟/输出tokens)\n")
     lines.append("| 场景 | " + " | ".join(ep_names) + " | 差值(中转-上游) |")
     lines.append("|------|" + "------|" * (len(ep_names) + 1))
     for cond in CONDITIONS:
