@@ -166,9 +166,10 @@ class SingleResult:
     tpot: float               # 每 token 输出时间（ms）
     tps: float                # 每秒输出 token 数
     total_time: float         # 总耗时（秒）
-    task_scores: list[int]    # 各任务评分
-    task_score_avg: float     # 平均任务评分
     success: bool             # 是否成功
+    question_idx: int = 0     # 问题序号
+    task_score_avg: float = 0.0  # 任务评分
+    task_scores: list[int] | None = None  # 各任务评分
     error: str = ""           # 错误信息
 
 
@@ -508,7 +509,23 @@ def aggregate_results(all_results: list[dict]) -> list[AggregatedResult]:
             task_score_min=round(min(task_scores), 1),
             task_score_max=round(max(task_scores), 1),
             success_rate=round(len(success_items) / len(items) * 100, 1) if items else 0,
-            details=[SingleResult(**i) for i in items],
+            details=[SingleResult(
+                condition=i["condition"],
+                model=i["model"],
+                sample_index=i["sample_index"],
+                question_idx=i.get("question_idx", 0),
+                input_tokens_est=i["input_tokens_est"],
+                max_tokens=i["max_tokens"],
+                output_tokens=i["output_tokens"],
+                ttft=i["ttft"],
+                tpot=i["tpot"],
+                tps=i["tps"],
+                total_time=i["total_time"],
+                task_scores=[i["task_score"]],
+                task_score_avg=float(i["task_score"]),
+                success=i["success"],
+                error=i.get("error", ""),
+            ) for i in items],
         )
         aggregated.append(agg)
 
