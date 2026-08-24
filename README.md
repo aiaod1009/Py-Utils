@@ -170,3 +170,4 @@ python full_test.py --samples 10 --only FUNC-001,PERF-001
 - 其他模型支持深度思考模式，建议改成false
 
 
+
