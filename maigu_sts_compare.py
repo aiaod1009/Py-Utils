@@ -93,11 +93,10 @@ CONDITIONS: list[dict] = [
 ]
 
 # 单次任务评估问题（每样本只问 1 题，专注于 TTFT/TPOT）
+# 注：GLM 在长 prompt 下会强制开启 thinking，问题过复杂会导致 4K(max_tokens=1024) 思考占满
+# 因此使用单一聚焦任务，保证 4K 也有空间输出可见内容
 EVALUATION_QUESTION = (
-    "请基于上述文章内容完成以下任务：\n"
-    "1) 用不超过200字概括文章核心观点；\n"
-    "2) 列出3个关键信息点；\n"
-    "3) 简要说明 Transformer 架构对 AI 发展的意义。"
+    "请基于上述文章，用不超过150字概括文章的核心观点，并简要说明 Transformer 架构的意义。"
 )
 
 REQUEST_TIMEOUT = 300  # 秒
@@ -236,6 +235,7 @@ def call_api(endpoint: dict, model: str, prompt: str, max_tokens: int) -> dict:
 
     request_start = time.time()
     first_token_time: Optional[float] = None  # 仅在实际 content 到达时才设置
+    last_token_time: Optional[float] = None  # 最后一个内容 chunk 时间
     token_timestamps: list[float] = []
     full_content = ""
     full_reasoning = ""
@@ -286,6 +286,7 @@ def call_api(endpoint: dict, model: str, prompt: str, max_tokens: int) -> dict:
                 # 仅在实际内容 token 到达时设置首 token 时间
                 if first_token_time is None:
                     first_token_time = now
+                last_token_time = now
                 token_timestamps.append(now)
                 full_content += content
             if reasoning:
@@ -316,11 +317,23 @@ def call_api(endpoint: dict, model: str, prompt: str, max_tokens: int) -> dict:
         }
 
     ttft = first_token_time - request_start
-    output_tokens = usage_data.get("completion_tokens", 0)
-    if output_tokens <= 0 and token_timestamps:
-        output_tokens = max(1, int(len(full_content) / 1.4))
 
-    total_token_time = request_end - first_token_time if token_timestamps else 0
+    # 计算可见 token 数（排除 thinking）
+    completion_tokens = usage_data.get("completion_tokens", 0)
+    details = usage_data.get("completion_tokens_details") or {}
+    reasoning_tokens = details.get("reasoning_tokens", 0) or usage_data.get("reasoning_tokens", 0)
+    visible_tokens = max(completion_tokens - reasoning_tokens, 0)
+
+    # 退化：若 usage 没拆分 reasoning_tokens，但有思考 chunks，则按内容字符估算
+    if visible_tokens == 0 and token_timestamps:
+        visible_tokens = max(1, int(len(full_content) / 1.4))
+    elif visible_tokens == 0 and completion_tokens > 0:
+        visible_tokens = completion_tokens
+
+    output_tokens = visible_tokens
+
+    # 用首末内容 chunk 间隔作为生成时间（更准确）
+    total_token_time = (last_token_time - first_token_time) if last_token_time else 0
     tpot = (total_token_time / output_tokens * 1000) if output_tokens > 0 else 0
     tps = (output_tokens / total_token_time) if total_token_time > 0 else 0
 
