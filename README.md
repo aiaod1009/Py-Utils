@@ -168,3 +168,5 @@ python full_test.py --samples 10 --only FUNC-001,PERF-001
 - 不同模型对 `max_tokens`、`response_format` 等参数支持度不同，切换模型时注意调整
 - MiniMax-2.5等模型仅支持深度思考模式，务必改成true
 - 其他模型支持深度思考模式，建议改成false
+
+
