@@ -41,6 +41,11 @@ except ImportError:
     print("[警告] openpyxl 未安装，无法生成 Excel。请执行: pip install openpyxl")
 
 
+# 全局 Session：禁用系统代理读取，避免 Clash 等代理拦截导致 SSL EOF
+API_SESSION = requests.Session()
+API_SESSION.trust_env = False
+
+
 # ============================================================
 # .env 加载
 # ============================================================
@@ -230,7 +235,6 @@ def call_api(endpoint: dict, model: str, prompt: str, max_tokens: int) -> dict:
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": True,
-        "enable_thinking": False,
     }
 
     request_start = time.time()
@@ -243,7 +247,7 @@ def call_api(endpoint: dict, model: str, prompt: str, max_tokens: int) -> dict:
     usage_data: dict = {}
 
     try:
-        resp = requests.post(
+        resp = API_SESSION.post(
             url,
             headers=headers,
             json=payload,
